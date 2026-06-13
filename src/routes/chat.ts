@@ -19,6 +19,7 @@ import {
 import { enqueueLogEntry } from "../logs/entry.js";
 import { getRealClientIp } from "../utils/get-real-client-ip.js";
 import { randomUUID } from "crypto";
+import { log } from "../utils/logger.js";
 import {
   handleProxyRequest,
 } from "./shared/proxy-handler.js";
@@ -85,9 +86,28 @@ export function createChatRoutes(
 
   app.post("/v1/chat/completions", apiKeyAuth(accountPool), async (c) => {
     // Parse request
-    const body = await c.req.json();
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch (e) {
+      log.warn("Failed to parse request JSON", { error: String(e) });
+      c.status(400);
+      return c.json({
+        error: {
+          message: "Invalid JSON format",
+          type: "invalid_request_error",
+          param: null,
+          code: "invalid_request",
+        },
+      });
+    }
+
     const parsed = ChatCompletionRequestSchema.safeParse(body);
     if (!parsed.success) {
+      log.warn("Request schema validation failed", {
+        error: parsed.error.message,
+        body,
+      });
       c.status(400);
       return c.json({
         error: {

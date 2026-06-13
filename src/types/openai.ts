@@ -207,6 +207,22 @@ function normalizeChatCompletionRequestInput(value: unknown): unknown {
     normalized.reasoning_effort = reasoning.effort;
   }
 
+  if (normalized.reasoning_effort === "auto" || normalized.reasoning_effort === null) {
+    delete normalized.reasoning_effort;
+  }
+
+  if (normalized.service_tier !== undefined && normalized.service_tier !== "fast" && normalized.service_tier !== "flex") {
+    delete normalized.service_tier;
+  }
+
+  if (normalized.tools === null) {
+    delete normalized.tools;
+  }
+
+  if (normalized.response_format === null) {
+    delete normalized.response_format;
+  }
+
   if (Array.isArray(value.tools)) {
     normalized.tools = value.tools.map(normalizeFlatTool);
   }
