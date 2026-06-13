@@ -1,4 +1,5 @@
 import type { UsageInfo } from "../../translation/codex-event-extractor.js";
+import { recordUsage } from "../../logs/usage-db.js";
 
 export interface LogProxyUsageOptions {
   tag: string;
@@ -7,6 +8,8 @@ export interface LogProxyUsageOptions {
   usage: UsageInfo;
   includeImageTokens?: boolean;
   includeReasoningInHighInputWarning?: boolean;
+  model?: string;
+  clientIp?: string;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }
@@ -42,6 +45,17 @@ export function logProxyUsage(options: LogProxyUsageOptions): void {
     warn(
       `[${tag}] ⚠ High input token count: ${usage.input_tokens} tokens` +
       (includeReasoningInHighInputWarning && usage.reasoning_tokens ? ` (reasoning=${usage.reasoning_tokens})` : ""),
+    );
+  }
+
+  // Record long-term usage analytics
+  if (options.model) {
+    recordUsage(
+      options.model, 
+      usage.input_tokens, 
+      usage.output_tokens, 
+      usage.cached_tokens ?? 0, 
+      options.clientIp ?? "unknown"
     );
   }
 }

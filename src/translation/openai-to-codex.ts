@@ -17,6 +17,7 @@ import {
   openAIToolChoiceToCodex,
   openAIFunctionsToCodex,
 } from "./tool-format.js";
+import { compressWithAutoRtk } from "./auto-rtk.js";
 
 /** Extract plain text from content (string, array, null, or undefined). */
 function extractText(content: ChatMessage["content"]): string {
@@ -49,9 +50,15 @@ function extractContent(
 
   // Multimodal: convert to Codex content parts
   const parts: CodexContentPart[] = [];
+  const autoRtkConfig = getConfig().auto_rtk;
+  const autoRtkOptions = {
+    enabled: autoRtkConfig.enabled ?? true,
+    maxCharsPerMessage: autoRtkConfig.max_chars_per_message ?? 8000,
+  };
+
   for (const p of content) {
     if (p.type === "text" && p.text) {
-      parts.push({ type: "input_text", text: p.text });
+      parts.push({ type: "input_text", text: compressWithAutoRtk(p.text, autoRtkOptions) });
     } else if (p.type === "image_url") {
       // OpenAI format: image_url: { url: "data:..." } or image_url: "string"
       const imageUrl = p.image_url as
@@ -99,6 +106,12 @@ export function translateToCodexRequest(
   const cfg = modelConfig ?? getConfig().model;
   const instructions = buildInstructions(userInstructions, cfg);
 
+  const autoRtkConfig = getConfig().auto_rtk;
+  const autoRtkOptions = {
+    enabled: autoRtkConfig.enabled ?? true,
+    maxCharsPerMessage: autoRtkConfig.max_chars_per_message ?? 8000,
+  };
+
   // Build input items from non-system messages
   // Handles new format (tool/tool_calls) and legacy format (function/function_call)
   const input: CodexInputItem[] = [];
@@ -135,17 +148,21 @@ export function translateToCodexRequest(
       input.push({
         type: "function_call_output",
         call_id: msg.tool_call_id ?? "unknown",
-        output: extractText(msg.content),
+        output: compressWithAutoRtk(extractText(msg.content), autoRtkOptions),
       });
     } else if (msg.role === "function") {
       // Legacy function result → native format
       input.push({
         type: "function_call_output",
         call_id: `fc_${msg.name ?? "unknown"}`,
-        output: extractText(msg.content),
+        output: compressWithAutoRtk(extractText(msg.content), autoRtkOptions),
       });
     } else {
-      input.push({ role: "user", content: extractContent(msg.content) });
+      const extracted = extractContent(msg.content);
+      const content = typeof extracted === "string" 
+        ? compressWithAutoRtk(extracted, autoRtkOptions) 
+        : extracted;
+      input.push({ role: "user", content });
     }
   }
 

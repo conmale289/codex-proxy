@@ -423,6 +423,8 @@ export interface LogNonStreamingUsageOptions {
   entryId: string;
   requestId: string;
   usage: UsageInfo;
+  model?: string;
+  clientIp?: string;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }

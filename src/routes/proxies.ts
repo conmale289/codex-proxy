@@ -65,10 +65,10 @@ export function createProxyRoutes(proxyPool: ProxyPool, accountPool: AccountPool
     // URL validation + scheme check
     try {
       const parsed = new URL(url);
-      const allowed = ["http:", "https:", "socks5:", "socks5h:"];
+      const allowed = ["http:", "https:", "socks5:", "socks5h:", "cf-relay:"];
       if (!allowed.includes(parsed.protocol)) {
         c.status(400);
-        return c.json({ error: `Unsupported protocol "${parsed.protocol}". Use http, https, socks5, or socks5h.` });
+        return c.json({ error: `Unsupported protocol "${parsed.protocol}". Use http, https, socks5, socks5h, or cf-relay.` });
       }
     } catch {
       c.status(400);
@@ -401,7 +401,7 @@ export function createProxyRoutes(proxyPool: ProxyPool, accountPool: AccountPool
       }
       try {
         const p = new URL(url);
-        const allowed = ["http:", "https:", "socks5:", "socks5h:"];
+        const allowed = ["http:", "https:", "socks5:", "socks5h:", "cf-relay:"];
         if (!allowed.includes(p.protocol)) {
           errors.push(`Unsupported protocol "${p.protocol}" in ${url}`);
           continue;

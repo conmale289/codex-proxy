@@ -12,7 +12,10 @@ import { logger } from "./middleware/logger.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { dashboardAuth } from "./middleware/dashboard-auth.js";
 import { logCapture } from "./middleware/log-capture.js";
+import { logStore } from "./logs/store.js";
 import { cors } from "./middleware/cors.js";
+import { rateLimit } from "./middleware/rate-limit.js";
+import { payloadGuard } from "./middleware/payload-guard.js";
 
 import type { UpstreamAdapter } from "./proxy/upstream-adapter.js";
 import { createAuthRoutes } from "./routes/auth.js";
@@ -96,6 +99,9 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   // Clean up stale refresh locks from previous crashes
   cleanupStaleLocks();
 
+  // Initialize persistent logs
+  await logStore.init();
+
   // Initialize managers
   const accountPool = new AccountPool();
   const refreshScheduler = new RefreshScheduler(accountPool);
@@ -117,11 +123,16 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
 
   // Global middleware
   app.use("*", cors);
+  app.use("/v1/*", payloadGuard);
   app.use("*", requestId);
   app.use("*", logger);
   app.onError(errorHandler);
   app.use("*", dashboardAuth);
   app.use("*", logCapture);
+  
+  // Rate limiting for public endpoints
+  app.use("/v1/*", rateLimit);
+  app.use("/v1beta/*", rateLimit);
 
   // Build upstream router from config
   const cfg = getConfig();

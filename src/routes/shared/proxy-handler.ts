@@ -62,6 +62,8 @@ import {
   containsInvalidEncryptedContentSignal,
   getReasoningReplayCache,
 } from "../../proxy/reasoning-replay-cache.js";
+import { responseCache } from "../../proxy/response-cache.js";
+import { globalConcurrencySemaphore } from "../../utils/concurrency-semaphore.js";
 
 export async function handleProxyRequest(options: HandleProxyRequestOptions): Promise<Response> {
   const { c, accountPool, cookieJar, req, fmt, proxyPool } = options;
@@ -79,6 +81,19 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
     promptCacheKey: sessionContext.promptCacheKey,
     explicitTurnState: sessionContext.explicitTurnState,
   });
+
+  // Check if we have a cached response
+  const cacheKey = !req.isStreaming && !req.expectsImageGen 
+    ? responseCache.generateKey(req.model, req.codexRequest.input ?? [])
+    : null;
+
+  if (cacheKey) {
+    const cachedResponse = responseCache.get(cacheKey);
+    if (cachedResponse) {
+      console.log(`[${fmt.tag}] ⚡ Cache hit for non-streaming request`);
+      return c.json(cachedResponse);
+    }
+  }
 
   const released = new Set<string>();
   const verifiedExcludeIds: string[] = [];
@@ -249,7 +264,20 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
     });
 
   for (;;) {
+    await globalConcurrencySemaphore.acquire();
+    let semaphoreReleased = false;
+    const releaseSemaphore = () => {
+      if (!semaphoreReleased) {
+        semaphoreReleased = true;
+        globalConcurrencySemaphore.release();
+      }
+    };
+
     try {
+      // Ensure semaphore is released if client disconnects early or network drops
+      const abortListener = () => releaseSemaphore();
+      c.req.raw.signal.addEventListener("abort", abortListener, { once: true });
+
       const { rawResponse, upstreamTurnState } = await sendProxyUpstreamAttempt({
         accountPool,
         api: codexApi,
@@ -266,11 +294,26 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
       // ── Streaming path ──
       if (req.isStreaming) {
+        // Hono streams execute asynchronously. The `handleStreaming` response is
+        // returned instantly. We release the semaphore when the stream finishes or errors.
+        const originalOnResponseCompleted = fmt.streamTranslator;
         return handleStreaming({
           c,
           accountPool,
           req,
-          fmt,
+          fmt: {
+             ...fmt,
+             streamTranslator: (...args: Parameters<typeof fmt.streamTranslator>) => {
+               const gen = fmt.streamTranslator(...args);
+               return (async function* () {
+                 try {
+                   yield* gen;
+                 } finally {
+                   releaseSemaphore();
+                 }
+               })();
+             }
+          },
           api: codexApi,
           response: rawResponse,
           entryId,
@@ -286,7 +329,7 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
       }
 
       // ── Non-streaming path (with empty-response retry) ──
-      return await handleNonStreaming({
+      const nonStreamingResponse = await handleNonStreaming({
         c,
         accountPool,
         cookieJar,
@@ -312,7 +355,26 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
         },
         variantHash: sessionContext.variantHash,
       });
+
+      // If we got a successful non-streaming response and we have a cache key, store it.
+      if (cacheKey && nonStreamingResponse.status === 200) {
+        // We need to clone it because we consume the body here
+        const clonedResponse = nonStreamingResponse.clone();
+        try {
+          const jsonBody = await clonedResponse.json();
+          // We only cache valid successful JSON responses
+          if (jsonBody && !jsonBody.error) {
+            responseCache.set(cacheKey, jsonBody);
+          }
+        } catch (e) {
+          // ignore parsing error
+        }
+      }
+
+      releaseSemaphore();
+      return nonStreamingResponse;
     } catch (err) {
+      releaseSemaphore(); // Ensure semaphore is released before we sleep/retry or abort
       if (containsInvalidEncryptedContentSignal(err)) {
         reasoningReplayCache.evictByIdentity({
           entryId,
@@ -352,7 +414,7 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
         case "error_handler_decides": {
           const decision = handleCodexApiError(
-            err as CodexApiError, accountPool, entryId, req.codexRequest.model, fmt.tag, modelRetried, cookieJar,
+            err as CodexApiError, accountPool, entryId, req.codexRequest.model, fmt.tag, modelRetried, cookieJar, proxyPool
           );
 
           const errorRetryTransition = applyProxyErrorRetryTransition({

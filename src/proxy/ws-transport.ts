@@ -22,6 +22,7 @@ import type { ParsedRateLimit } from "./rate-limit-headers.js";
 import { parseRateLimitsEvent } from "./rate-limit-headers.js";
 import { CodexApiError } from "./codex-types.js";
 import { getProxyUrl } from "../tls/proxy.js";
+import { parseCfRelayUrl, applyCfRelayToWs } from "./cf-relay-utils.js";
 import {
   PersistentWs,
   WsReusedConnectionError,
@@ -249,6 +250,15 @@ export async function createWebSocketResponse(
   onRateLimits?: (rl: ParsedRateLimit) => void,
   poolCtx?: WsPoolContext,
 ): Promise<Response> {
+  const cfRelay = parseCfRelayUrl(proxyUrl);
+  let effectiveWsUrl = wsUrl;
+  let effectiveProxyUrl = proxyUrl;
+  
+  if (cfRelay.isRelay) {
+    effectiveWsUrl = applyCfRelayToWs(wsUrl, headers, cfRelay.relayUrl);
+    effectiveProxyUrl = undefined;
+  }
+
   if (poolCtx) {
     try {
       const acquired = await poolCtx.pool.acquire(
@@ -256,9 +266,9 @@ export async function createWebSocketResponse(
         poolCtx.poolKey,
         (deps) =>
           createPersistentWsConnection({
-            wsUrl,
+            wsUrl: effectiveWsUrl,
             headers,
-            proxyUrl,
+            proxyUrl: effectiveProxyUrl,
             entryId: deps.entryId,
             poolKey: deps.poolKey,
             hooks: deps.hooks,
@@ -276,7 +286,7 @@ export async function createWebSocketResponse(
             // Stale-reuse: open a fresh one-shot WS for this single request.
             // The pool's onDead hook has already evicted the dead entry.
             poolCtx.onDecision?.({ kind: "retry-after-stale-reuse", wsId: acquired.ws.id });
-            return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);
+            return openOneShotWs(effectiveWsUrl, headers, request, signal, effectiveProxyUrl, onRateLimits);
           }
           throw err;
         }
@@ -293,7 +303,7 @@ export async function createWebSocketResponse(
     }
   }
 
-  return openOneShotWs(wsUrl, headers, request, signal, proxyUrl, onRateLimits);
+  return openOneShotWs(effectiveWsUrl, headers, request, signal, effectiveProxyUrl, onRateLimits);
 }
 
 async function openOneShotWs(

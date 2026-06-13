@@ -21,6 +21,7 @@ import type { CookieJar } from "../../proxy/cookie-jar.js";
 import { recordCfPathBlock } from "../../auth/cf-path-block-tracker.js";
 import { recordCfChallengeCooldown } from "../../auth/cf-challenge-cooldown.js";
 import { appendErrorLog } from "../../logs/error-log.js";
+import type { ProxyPool } from "../../proxy/proxy-pool.js";
 
 /** Consecutive CF path-blocks before the account is auto-disabled. */
 const CF_PATH_BLOCK_DISABLE_THRESHOLD = 3;
@@ -64,8 +65,10 @@ export function handleCodexApiError(
   tag: string,
   modelRetried: boolean,
   cookieJar?: CookieJar,
+  proxyPool?: ProxyPool,
 ): ErrorAction {
   const email = pool.getEntry(entryId)?.email ?? "?";
+  const proxyId = proxyPool?.getAssignment(entryId);
 
   // 1. Model not supported on this account's plan
   if (isModelNotSupportedError(err)) {
@@ -112,6 +115,9 @@ export function handleCodexApiError(
   // 4. Cloudflare challenge (403 HTML/challenge response) — cooldown, not ban.
   if (isCfChallengeError(err)) {
     const cooldown = recordCfChallengeCooldown(entryId);
+    if (proxyId) {
+      proxyPool?.markProxyCooling(proxyId, 900); // 15 minutes cooldown for proxy IP
+    }
     console.warn(
       `[${tag}] Account ${entryId} (${email}) | Cloudflare challenge 403, ` +
         `cooling down for ${cooldown.delaySeconds}s and trying different account...`,
@@ -127,6 +133,9 @@ export function handleCodexApiError(
   // 5. Ban (non-Cloudflare 403)
   if (isBanError(err)) {
     pool.markStatus(entryId, "banned");
+    if (proxyId) {
+      proxyPool?.markProxyCooling(proxyId, 900);
+    }
     console.warn(
       `[${tag}] Account ${entryId} (${email}) | 403 banned, trying different account...`,
     );
@@ -156,6 +165,9 @@ export function handleCodexApiError(
     cookieJar?.clear(entryId);
     const blockCount = recordCfPathBlock(entryId);
     if (blockCount >= CF_PATH_BLOCK_DISABLE_THRESHOLD) {
+      if (proxyId) {
+        proxyPool?.markProxyCooling(proxyId, 900);
+      }
       pool.markStatus(entryId, "disabled");
       console.warn(
         `[${tag}] Account ${entryId} (${email}) | Cloudflare path-block 404 ×${blockCount} — auto-disabling account`,

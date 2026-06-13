@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
 import { redactJson } from "./redact.js";
-
+import { getDataDir } from "../paths.js";
 export type LogDirection = "ingress" | "egress";
 
 export interface LogRecord {
@@ -65,9 +68,37 @@ export class LogStore {
   private dropped = 0;
   private queue: LogRecord[] = [];
   private flushScheduled = false;
+  private logFilePath: string | null = null;
+  private maxFileSize = 50 * 1024 * 1024; // 50 MB
 
   constructor(capacity = DEFAULT_CAPACITY) {
     this.capacity = capacity;
+  }
+
+  async init(): Promise<void> {
+    this.logFilePath = path.join(getDataDir(), "logs.jsonl");
+    if (!fs.existsSync(this.logFilePath)) return;
+
+    try {
+      const fileStream = fs.createReadStream(this.logFilePath);
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+      const loaded: LogRecord[] = [];
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          loaded.push(JSON.parse(line));
+        } catch { /* skip corrupted lines */ }
+      }
+      
+      // Keep only the most recent 'capacity' logs
+      if (loaded.length > this.capacity) {
+        this.records = loaded.slice(loaded.length - this.capacity);
+      } else {
+        this.records = loaded;
+      }
+    } catch (err) {
+      console.error("[LogStore] Failed to load persistent logs", err);
+    }
   }
 
   getState(): LogState {
@@ -141,6 +172,8 @@ export class LogStore {
     if (!this.queue.length) return;
 
     const batch = this.queue.splice(0, this.queue.length);
+    const linesToAppend: string[] = [];
+
     for (const record of batch) {
       const redacted: LogRecord = {
         ...record,
@@ -148,6 +181,24 @@ export class LogStore {
         response: record.response !== undefined ? redactJson(record.response) : undefined,
       };
       this.records.push(redacted);
+      linesToAppend.push(JSON.stringify(redacted));
+    }
+
+    if (this.logFilePath && linesToAppend.length > 0) {
+      try {
+        fs.appendFileSync(this.logFilePath, linesToAppend.join("\n") + "\n", "utf8");
+        // Simple rotation check
+        const stats = fs.statSync(this.logFilePath);
+        if (stats.size > this.maxFileSize) {
+          const oldPath = this.logFilePath + ".old";
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          fs.renameSync(this.logFilePath, oldPath);
+          // Write current memory cache back to the new file
+          fs.writeFileSync(this.logFilePath, this.records.map(r => JSON.stringify(r)).join("\n") + "\n", "utf8");
+        }
+      } catch (err) {
+        console.error("[LogStore] Failed to write logs to disk", err);
+      }
     }
 
     this.trimToCapacity();

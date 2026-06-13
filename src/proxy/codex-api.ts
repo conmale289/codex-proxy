@@ -25,6 +25,7 @@ export type { WsPoolContext };
 import { parseSSEBlock, parseSSEStream } from "./codex-sse.js";
 import { fetchUsage } from "./codex-usage.js";
 import { fetchModels, probeEndpoint as probeEndpointFn } from "./codex-models.js";
+import { parseCfRelayUrl, applyCfRelayToHttp } from "./cf-relay-utils.js";
 import type { CookieJar } from "./cookie-jar.js";
 import type { BackendModelEntry } from "../models/model-store.js";
 
@@ -224,11 +225,19 @@ export class CodexApi {
   async warmup(): Promise<CodexUsageResponse | null> {
     const config = getConfig();
     const transport = this.resolveTransport();
-    const url = `${config.api.base_url}/codex/usage`;
+    let url = `${config.api.base_url}/codex/usage`;
     const headers = this.applyHeaders(
       buildHeaders(this.token, this.accountId),
     );
     headers["Accept"] = "application/json";
+    
+    const cfRelay = parseCfRelayUrl(this.proxyUrl);
+    let effectiveProxyUrl = this.proxyUrl;
+    if (cfRelay.isRelay) {
+      url = applyCfRelayToHttp(url, headers, cfRelay.relayUrl);
+      effectiveProxyUrl = undefined;
+    }
+
     if (!transport.isImpersonate()) {
       headers["Accept-Encoding"] = "gzip, deflate";
     }
@@ -236,11 +245,11 @@ export class CodexApi {
     try {
       let body: string;
       if (transport.getWithCookies) {
-        const result = await transport.getWithCookies(url, headers, 15, this.proxyUrl);
+        const result = await transport.getWithCookies(url, headers, 15, effectiveProxyUrl);
         this.captureCookies(result.setCookieHeaders);
         body = result.body;
       } else {
-        const result = await transport.get(url, headers, 15, this.proxyUrl);
+        const result = await transport.get(url, headers, 15, effectiveProxyUrl);
         body = result.body;
       }
       const parsed = JSON.parse(body) as CodexUsageResponse;
@@ -370,11 +379,19 @@ export class CodexApi {
   ): Promise<Response> {
     const transport = this.resolveTransport();
     const baseUrl = this.resolveBaseUrl();
-    const url = `${baseUrl}/codex/responses`;
+    let url = `${baseUrl}/codex/responses`;
 
     const headers = this.applyHeaders(
       buildHeadersWithContentType(this.token, this.accountId),
     );
+    
+    const cfRelay = parseCfRelayUrl(this.proxyUrl);
+    let effectiveProxyUrl = this.proxyUrl;
+    if (cfRelay.isRelay) {
+      url = applyCfRelayToHttp(url, headers, cfRelay.relayUrl);
+      effectiveProxyUrl = undefined;
+    }
+
     headers["Accept"] = "text/event-stream";
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
@@ -415,7 +432,7 @@ export class CodexApi {
 
     let transportRes;
     try {
-      transportRes = await transport.post(url, headers, body, signal, undefined, this.proxyUrl);
+      transportRes = await transport.post(url, headers, body, signal, undefined, effectiveProxyUrl);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new CodexApiError(0, msg);
@@ -464,11 +481,19 @@ export class CodexApi {
   ): Promise<CodexCompactResponse> {
     const transport = this.resolveTransport();
     const baseUrl = this.resolveBaseUrl();
-    const url = `${baseUrl}/codex/responses/compact`;
+    let url = `${baseUrl}/codex/responses/compact`;
 
     const headers = this.applyHeaders(
       buildHeadersWithContentType(this.token, this.accountId),
     );
+
+    const cfRelay = parseCfRelayUrl(this.proxyUrl);
+    let effectiveProxyUrl = this.proxyUrl;
+    if (cfRelay.isRelay) {
+      url = applyCfRelayToHttp(url, headers, cfRelay.relayUrl);
+      effectiveProxyUrl = undefined;
+    }
+
     // No "Accept: text/event-stream" — compact returns plain JSON
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
@@ -479,7 +504,7 @@ export class CodexApi {
 
     let transportRes;
     try {
-      transportRes = await transport.post(url, headers, body, signal, undefined, this.proxyUrl);
+      transportRes = await transport.post(url, headers, body, signal, undefined, effectiveProxyUrl);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new CodexApiError(0, msg);

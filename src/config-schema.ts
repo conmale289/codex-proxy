@@ -87,6 +87,10 @@ export const ConfigSchema = z.object({
     inject_desktop_context: z.boolean().default(false),
     suppress_desktop_directives: z.boolean().default(true),
   }),
+  auto_rtk: z.object({
+    enabled: z.boolean().default(true),
+    max_chars_per_message: z.number().int().min(100).default(8000),
+  }).default({}),
   auth: z.object({
     jwt_token: z.string().nullable().default(null),
     chatgpt_oauth: z.boolean().default(true),

@@ -20,6 +20,7 @@ import { resolve, dirname } from "path";
 import { getDataDir } from "../paths.js";
 import { getTransport, type TlsTransport } from "../tls/transport.js";
 import { getConfig } from "../config.js";
+import { parseCfRelayUrl, applyCfRelayToHttp } from "./cf-relay-utils.js";
 
 function getProxiesFile(): string {
   return resolve(getDataDir(), "proxies.json");
@@ -43,6 +44,7 @@ export interface ProxyEntry {
   status: ProxyStatus;
   health: ProxyHealthInfo | null;
   addedAt: string;
+  cooldownUntil?: number | null;
 }
 
 /** Special assignment values (not a proxy ID). */
@@ -155,6 +157,19 @@ export class ProxyPool {
     return true;
   }
 
+  /**
+   * Puts a proxy in a temporary cooling state (e.g. after receiving a 403 or Cloudflare block).
+   * It will be skipped by Auto round-robin until the cooldown expires.
+   */
+  markProxyCooling(id: string, durationSec: number = 900): boolean {
+    const entry = this.proxies.get(id);
+    if (!entry) return false;
+    entry.cooldownUntil = Date.now() + (durationSec * 1000);
+    console.log(`[ProxyPool] Proxy ${id} (${entry.name}) placed in cooldown for ${durationSec}s due to upstream block`);
+    this.schedulePersist();
+    return true;
+  }
+
   // ── Assignment ────────────────────────────────────────────────────
 
   assign(accountId: string, proxyId: string): void {
@@ -232,6 +247,10 @@ export class ProxyPool {
       // Health-check failed — caller requested skipping unhealthy proxies
       return undefined;
     }
+    if (proxy.cooldownUntil && proxy.cooldownUntil > Date.now()) {
+      // Currently in cooldown — act as if unreachable/disabled
+      return undefined;
+    }
     return proxy.url;
   }
 
@@ -240,8 +259,9 @@ export class ProxyPool {
    * Returns undefined (global) if no active proxies exist.
    */
   private pickRoundRobin(): string | undefined {
+    const now = Date.now();
     const active = Array.from(this.proxies.values()).filter(
-      (p) => p.status === "active",
+      (p) => p.status === "active" && (!p.cooldownUntil || p.cooldownUntil <= now),
     );
     if (active.length === 0) return undefined;
 
@@ -269,12 +289,22 @@ export class ProxyPool {
       // Fallback if config is not loaded yet (e.g. in some early tests)
     }
 
+    const cfRelay = parseCfRelayUrl(proxy.url);
+    const headers: Record<string, string> = { Accept: "application/json" };
+    let transportUrl = checkUrl;
+    let transportProxyUrl: string | null | undefined = proxy.url;
+
+    if (cfRelay.isRelay) {
+      transportUrl = applyCfRelayToHttp(checkUrl, headers, cfRelay.relayUrl);
+      transportProxyUrl = undefined;
+    }
+
     try {
       const result = await transport.get(
-        checkUrl,
-        { Accept: "application/json" },
+        transportUrl,
+        headers,
         10,
-        proxy.url,
+        transportProxyUrl,
       );
       const latencyMs = Date.now() - start;
 
@@ -432,6 +462,7 @@ export class ProxyPool {
               status: p.status ?? "active",
               health: p.health ?? null,
               addedAt: p.addedAt ?? new Date().toISOString(),
+              cooldownUntil: p.cooldownUntil ?? null,
             });
           }
         }
