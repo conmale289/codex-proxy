@@ -7,6 +7,7 @@
 import type { AccountPool } from "../../auth/account-pool.js";
 import type { AcquiredAccount } from "../../auth/types.js";
 import type { UsageInfo } from "../../translation/codex-event-extractor.js";
+import { getAccountWaitQueue } from "../../auth/account-wait-queue.js";
 
 /**
  * Acquire an account from the pool for the given model.
@@ -45,4 +46,6 @@ export function releaseAccount(
     guard.add(entryId);
   }
   pool.release(entryId, usage);
+  // Notify the wait queue that an account slot has been freed
+  getAccountWaitQueue().notifyRelease();
 }

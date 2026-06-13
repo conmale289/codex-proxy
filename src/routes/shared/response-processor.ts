@@ -63,6 +63,13 @@ export interface StreamResponseOptions {
  */
 export const HEARTBEAT_INTERVAL_MS = 15_000;
 
+/**
+ * Maximum time (ms) without any data from upstream before we kill the stream.
+ * Prevents hung upstream connections from holding account slots indefinitely.
+ * Distinct from HEARTBEAT — heartbeat is client-facing; this guards against upstream silence.
+ */
+export const STREAM_INACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes
+
 /** SSE comment line — ignored by every spec-compliant SSE parser. */
 const HEARTBEAT_CHUNK = ": ping\n\n";
 
@@ -109,6 +116,32 @@ export async function streamResponse(options: StreamResponseOptions): Promise<vo
       : null;
   // Don't keep the event loop alive solely for heartbeats.
   heartbeatTimer?.unref?.();
+
+  // ── Upstream Inactivity Timeout ──
+  // Kill the stream if upstream produces no data for STREAM_INACTIVITY_TIMEOUT_MS.
+  // This prevents hung connections from holding account slots indefinitely.
+  let lastUpstreamData = Date.now();
+  const inactivityTimer = setInterval(() => {
+    if (streamDone) return;
+    if (Date.now() - lastUpstreamData >= STREAM_INACTIVITY_TIMEOUT_MS) {
+      console.error(
+        `[stream-inactivity-timeout] rid=${diagnostics?.requestId ?? "?"} ` +
+        `tag=${diagnostics?.tag ?? adapter.tag} model=${model} ` +
+        `silent_for=${((Date.now() - lastUpstreamData) / 1000).toFixed(0)}s — aborting stream`,
+      );
+      streamDone = true;
+      diagnostics?.abortSignal?.dispatchEvent?.(new Event("abort"));
+      recordStreamCloseEvent({
+        kind: "upstream-inactivity-timeout",
+        requestId: diagnostics?.requestId ?? null,
+        tag: diagnostics?.tag ?? adapter.tag ?? null,
+        model,
+        accountEntryId: diagnostics?.accountEntryId ?? null,
+        variantHash: diagnostics?.variantHash ?? null,
+      });
+    }
+  }, 30_000); // Check every 30s
+  inactivityTimer.unref?.();
   // Diagnostic context passed into adapter-internal premature-close records
   // (e.g. streamPassthrough in responses.ts). The adapter is free to ignore
   // it; carrying it through here means audit entries land on the real
@@ -136,6 +169,7 @@ export async function streamResponse(options: StreamResponseOptions): Promise<vo
       onResponseMetadata,
       streamContext,
     })) {
+      lastUpstreamData = Date.now();
       const chunkTrace = inspectStreamChunk(chunk);
       if (debugDumpEnabled()) {
         debugDump("upstream-chunk", {
@@ -247,5 +281,6 @@ export async function streamResponse(options: StreamResponseOptions): Promise<vo
   } finally {
     streamDone = true;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (inactivityTimer) clearInterval(inactivityTimer);
   }
 }

@@ -20,7 +20,8 @@ export type StreamCloseKind =
   | "client-abort"
   | "client-write-failed"
   | "upstream-error"
-  | "upstream-premature";
+  | "upstream-premature"
+  | "upstream-inactivity-timeout";
 
 /** Caller-provided diagnostic context that travels with a streaming request.
  *  Optional fields are filled in opportunistically — missing context still
@@ -59,6 +60,7 @@ const ERROR_NAMES: Readonly<Record<StreamCloseKind, string>> = {
   "client-write-failed": "StreamClientWriteFailed",
   "upstream-error": "StreamUpstreamError",
   "upstream-premature": "StreamUpstreamPrematureClose",
+  "upstream-inactivity-timeout": "StreamUpstreamInactivityTimeout",
 };
 
 const BASE_MESSAGES: Readonly<Record<StreamCloseKind, string>> = {
@@ -66,6 +68,7 @@ const BASE_MESSAGES: Readonly<Record<StreamCloseKind, string>> = {
   "client-write-failed": "Client disconnected mid-stream (write failed)",
   "upstream-error": "Upstream stream errored",
   "upstream-premature": "Upstream stream closed before terminal event",
+  "upstream-inactivity-timeout": "Upstream stream killed due to inactivity timeout",
 };
 
 function prune<T extends object>(obj: T): Partial<T> {

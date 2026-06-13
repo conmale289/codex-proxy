@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const ROTATION_STRATEGIES = ["least_used", "round_robin", "sticky"] as const;
+export const ROTATION_STRATEGIES = ["least_used", "round_robin", "sticky", "adaptive"] as const;
 
 // Note: discriminatedUnion does not accept ZodEffects branches, so the
 // presence-of-secret-material checks are applied at the union level via
@@ -158,6 +158,9 @@ export const ConfigSchema = z.object({
   quota: z.object({
     refresh_interval_minutes: z.number().min(0).default(5),
     concurrency: z.number().int().min(1).default(10),
+    /** Maximum number of concurrent upstream requests across the entire proxy.
+     *  Prevents traffic spikes from triggering upstream WAF limits. */
+    global_concurrency: z.number().int().min(1).default(100),
     warning_thresholds: z.object({
       primary: z.array(z.number().min(1).max(100)).default([80, 90]),
       secondary: z.array(z.number().min(1).max(100)).default([80, 90]),
@@ -223,6 +226,40 @@ export const ConfigSchema = z.object({
         models: z.array(z.string()).default([]),
       }),
     ).default({}),
+  }).default({}),
+  /** Stealth mode — bundles anti-detection measures to reduce the risk of
+   *  accounts being flagged for unusual activity patterns. When `enabled` is
+   *  true, the stealth settings override relevant auth/quota defaults. */
+  stealth: z.object({
+    enabled: z.boolean().default(false),
+    /** Minimum milliseconds between consecutive requests on the same account.
+     *  Real Codex Desktop users naturally space requests 5-60+ seconds apart.
+     *  This enforces a floor to prevent machine-like burst patterns. */
+    min_request_interval_ms: z.number().int().min(0).default(3000),
+    /** Override max_concurrent_per_account when stealth is enabled. Real Codex
+     *  Desktop is single-threaded — it never sends concurrent requests from
+     *  one installation. Set to 1 for maximum safety. */
+    max_concurrent_per_account: z.number().int().min(1).default(1),
+    /** Generate unique installation IDs per account instead of sharing one
+     *  across all accounts. A fleet of accounts sharing one install ID is a
+     *  strong signal for proxy/automation tooling. */
+    per_account_installation_id: z.boolean().default(true),
+    /** Add random humanlike jitter (0.5-2s) to request timing on top of the
+     *  minimum interval. Makes traffic patterns less periodic/predictable. */
+    humanlike_jitter: z.boolean().default(true),
+    /** Hourly request count per account that triggers a warning log. */
+    hourly_request_warn: z.number().int().min(0).default(100),
+    /** Hourly request count per account that triggers throttle (extra delays). */
+    hourly_request_throttle: z.number().int().min(0).default(200),
+    /** Hourly request count per account that auto-pauses it for the
+     *  remainder of the hour to avoid detection. 0 disables. */
+    hourly_request_pause: z.number().int().min(0).default(500),
+  }).default({}),
+  /** Webhook notifications for account/system events. */
+  notifications: z.object({
+    /** URL to POST events to. Supports ntfy, Slack, Discord, or generic JSON.
+     *  null/empty disables notifications. Can also be set via CODEX_PROXY_WEBHOOK_URL env. */
+    webhook_url: z.string().nullable().default(null),
   }).default({}),
   /** Explicit model → provider name routing table. */
   model_routing: z.record(z.string(), z.string()).default({}),

@@ -8,6 +8,14 @@ import { getConfigDir, getDataDir, getBinDir, isEmbedded } from "../../paths.js"
 import { getTransportInfo } from "../../tls/transport.js";
 import { getProxyUrl } from "../../tls/proxy.js";
 import { isLocalhostRequest } from "../../utils/is-localhost.js";
+import { globalConcurrencySemaphore } from "../../utils/concurrency-semaphore.js";
+import { getWsPool } from "../../proxy/ws-pool.js";
+import { getAllBreakerStates } from "../../proxy/circuit-breaker.js";
+import { getAllHourlyCounts } from "../../auth/usage-anomaly-detector.js";
+import { responseCache } from "../../proxy/response-cache.js";
+import { getModelRequestCounters } from "../../proxy/model-request-counters.js";
+
+const startedAt = Date.now();
 
 export function createHealthRoutes(accountPool: AccountPool): Hono {
   const app = new Hono();
@@ -23,6 +31,63 @@ export function createHealthRoutes(accountPool: AccountPool): Hono {
         total: poolSummary.total,
         active: poolSummary.active,
         ...capacitySummary,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  /** Detailed health endpoint for monitoring and Docker health checks.
+   *  Surfaces upstream connectivity, account health, memory, and semaphore status. */
+  app.get("/health/detailed", async (c) => {
+    const authenticated = accountPool.isAuthenticated();
+    const poolSummary = accountPool.getPoolSummary();
+    const capacitySummary = accountPool.getCapacitySummary();
+    const memoryUsage = process.memoryUsage();
+    const wsPool = getWsPool();
+    const circuitBreakers = getAllBreakerStates();
+    const anomalyCounts = getAllHourlyCounts();
+    const config = getConfig();
+
+    const openCircuits = circuitBreakers.filter((b) => b.state === "open");
+
+    return c.json({
+      status: authenticated ? "healthy" : "degraded",
+      authenticated,
+      uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+      pool: {
+        total: poolSummary.total,
+        active: poolSummary.active,
+        ...capacitySummary,
+      },
+      concurrency: {
+        current: globalConcurrencySemaphore.current,
+        max: globalConcurrencySemaphore.max,
+        waiting: globalConcurrencySemaphore.waiting,
+      },
+      ws_pool: {
+        size: wsPool.size(),
+      },
+      memory: {
+        rss_mb: Math.round(memoryUsage.rss / 1024 / 1024),
+        heap_used_mb: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+        heap_total_mb: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+        external_mb: Math.round(memoryUsage.external / 1024 / 1024),
+      },
+      circuit_breakers: {
+        total: circuitBreakers.length,
+        open: openCircuits.length,
+        open_keys: openCircuits.map((b) => b.key),
+      },
+      response_cache: {
+        entries: responseCache.size,
+        bytes_mb: Math.round(responseCache.bytes / 1024 / 1024 * 100) / 100,
+      },
+      model_requests: getModelRequestCounters(),
+      stealth: {
+        enabled: config.stealth.enabled,
+        anomaly_counts: anomalyCounts.length > 0
+          ? anomalyCounts.sort((a, b) => b.count - a.count).slice(0, 5)
+          : [],
       },
       timestamp: new Date().toISOString(),
     });

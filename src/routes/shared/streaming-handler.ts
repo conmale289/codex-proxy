@@ -13,6 +13,8 @@ import { streamResponse } from "./response-processor.js";
 import { createResponseMetadataCollector } from "./response-metadata-collector.js";
 import { logProxyUsage } from "./proxy-usage-log.js";
 import { getReasoningReplayCache } from "../../proxy/reasoning-replay-cache.js";
+import { getAnalytics } from "../../logs/analytics.js";
+import { getPromptCacheTracker } from "../../proxy/prompt-cache-tracker.js";
 
 export interface HandleStreamingOptions {
   c: Context;
@@ -127,6 +129,23 @@ export function handleStreaming(options: HandleStreamingOptions): Response {
         onUsage: (u) => {
           usageInfo = u;
           recordStreamAffinity();
+          // Record analytics and prompt cache tracking
+          getAnalytics().recordRequest({
+            model: req.model,
+            inputTokens: u.input_tokens,
+            outputTokens: u.output_tokens,
+            cachedTokens: u.cached_tokens,
+            isError: false,
+          });
+          if (u.input_tokens > 0) {
+            getPromptCacheTracker().record({
+              entryId: capturedEntryId,
+              conversationId,
+              model: req.model,
+              inputTokens: u.input_tokens,
+              cachedTokens: u.cached_tokens ?? 0,
+            });
+          }
         },
         tupleSchema: req.tupleSchema,
         onResponseId: (id) => {

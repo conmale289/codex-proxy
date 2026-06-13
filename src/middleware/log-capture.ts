@@ -26,6 +26,10 @@ export async function logCapture(c: Context, next: Next): Promise<void> {
   await next();
   if (!shouldCaptureRequest(c)) return;
 
+  const accountId = c.get("logAccountId") as string | undefined;
+  const cacheHit = c.get("logCacheHit") as boolean | undefined;
+  const model = c.get("logModel") as string | undefined;
+
   enqueueLogEntry({
     requestId: c.get("requestId") ?? "-",
     direction: "ingress",
@@ -33,5 +37,7 @@ export async function logCapture(c: Context, next: Next): Promise<void> {
     path: c.req.path,
     status: c.res.status,
     latencyMs: Date.now() - startMs,
+    ...(model ? { model } : {}),
+    ...(accountId || cacheHit ? { meta: { ...(accountId ? { accountId } : {}), ...(cacheHit ? { cacheHit } : {}) } } : {}),
   });
 }

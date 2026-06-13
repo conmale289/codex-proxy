@@ -45,6 +45,7 @@ export function buildAccountExhaustionDetail(summary: AccountPoolSummary, messag
 
 export function respondWithNoAccount(options: RespondWithNoAccountOptions): Response {
   const { c, req, fmt } = options;
+  c.header("Retry-After", "30");
   if (canReturnStreamError(req, fmt)) {
     return streamErrorResponse(
       c,
@@ -59,6 +60,9 @@ export function respondWithNoAccount(options: RespondWithNoAccountOptions): Resp
 
 export function respondWithProxyError(options: RespondWithProxyErrorOptions): Response {
   const { c, req, fmt, status, message, useFormat429 = false } = options;
+  if (status === 429 || status === 503) {
+    c.header("Retry-After", status === 429 ? "60" : "30");
+  }
   if (canReturnStreamError(req, fmt)) {
     return streamErrorResponse(c, fmt, status, message);
   }

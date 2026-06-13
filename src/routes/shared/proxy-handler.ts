@@ -28,6 +28,9 @@ import { acquireAccount, releaseAccount } from "./account-acquisition.js";
 import { handleCodexApiError } from "./proxy-error-handler.js";
 import { handleStreaming } from "./streaming-handler.js";
 import { handleNonStreaming } from "./non-streaming-handler.js";
+import { recordRequestAndCheckAnomaly, peekHourlyCount } from "../../auth/usage-anomaly-detector.js";
+import { canRequest as circuitBreakerCanRequest, recordSuccess as circuitBreakerSuccess, recordFailure as circuitBreakerFailure } from "../../proxy/circuit-breaker.js";
+import { notifyStealthPause } from "../../utils/webhook-notifier.js";
 import { annotateImageGenOutcome, buildCodexApi } from "./proxy-handler-utils.js";
 import type {
   FormatAdapter,
@@ -64,6 +67,12 @@ import {
 } from "../../proxy/reasoning-replay-cache.js";
 import { responseCache } from "../../proxy/response-cache.js";
 import { globalConcurrencySemaphore } from "../../utils/concurrency-semaphore.js";
+import { getAccountWaitQueue } from "../../auth/account-wait-queue.js";
+import { generateDedupKey, getDedupInFlight, registerDedupInFlight } from "../../proxy/request-dedup.js";
+import { getAnalytics } from "../../logs/analytics.js";
+import { getPromptCacheTracker } from "../../proxy/prompt-cache-tracker.js";
+import { compressContext, shouldCompressContext } from "../../translation/context-compressor.js";
+import { recordModelRequest } from "../../proxy/model-request-counters.js";
 
 export async function handleProxyRequest(options: HandleProxyRequestOptions): Promise<Response> {
   const { c, accountPool, cookieJar, req, fmt, proxyPool } = options;
@@ -91,7 +100,33 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
     const cachedResponse = responseCache.get(cacheKey);
     if (cachedResponse) {
       console.log(`[${fmt.tag}] ⚡ Cache hit for non-streaming request`);
+      c.set("logCacheHit", true);
       return c.json(cachedResponse);
+    }
+  }
+
+  // ── Request Deduplication ──
+  // If the exact same non-streaming request is already in-flight, piggyback
+  // on its result instead of hitting upstream twice (double-click protection).
+  const dedupKey = generateDedupKey(req.model, req.codexRequest.input, req.isStreaming);
+  if (dedupKey) {
+    const inFlight = getDedupInFlight(dedupKey);
+    if (inFlight) {
+      console.log(`[${fmt.tag}] ⚡ Dedup hit — piggybacking on in-flight request`);
+      const result = await inFlight;
+      return c.json(result as object);
+    }
+  }
+
+  // ── Context Compression ──
+  // For long conversations without server-side history, compress middle turns
+  // to save tokens and reduce latency.
+  if (shouldCompressContext(req.codexRequest.input as unknown[] | undefined, req.codexRequest.previous_response_id)) {
+    const input = req.codexRequest.input as unknown[];
+    const compressed = compressContext(input);
+    if (compressed !== input) {
+      console.log(`[${fmt.tag}] 📦 Context compressed: ${input.length} → ${compressed.length} items`);
+      req.codexRequest.input = compressed as typeof req.codexRequest.input;
     }
   }
 
@@ -100,8 +135,63 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
   // Single acquire call — preferredEntryId is a hint, not a hard requirement
   let acquired = acquireAccount(accountPool, req.codexRequest.model, undefined, fmt.tag, sessionContext.preferredEntryId ?? undefined);
+
+  // ── Graceful Degradation: Wait Queue ──
+  // If no account is immediately available, wait briefly for one to be released
+  // instead of returning 503 instantly.
+  if (!acquired) {
+    const waitQueue = getAccountWaitQueue();
+    const gotRelease = await waitQueue.waitForRelease();
+    if (gotRelease) {
+      acquired = acquireAccount(accountPool, req.codexRequest.model, undefined, fmt.tag, sessionContext.preferredEntryId ?? undefined);
+    }
+  }
   if (!acquired) {
     return respondWithNoAccount({ c, req, fmt });
+  }
+
+  // ── Usage Anomaly Check ──
+  // When stealth mode is enabled, check if this account is hitting anomalous
+  // request volumes that could trigger upstream detection.
+  const anomalyAction = recordRequestAndCheckAnomaly(acquired.entryId);
+  if (anomalyAction === "pause") {
+    console.warn(
+      `[${fmt.tag}] ⚠️ Stealth: Account ${acquired.entryId} hit hourly request pause threshold. ` +
+      `Auto-pausing to avoid detection.`,
+    );
+    notifyStealthPause(acquired.entryId, null, peekHourlyCount(acquired.entryId));
+    releaseAccount(accountPool, acquired.entryId, undefined, released);
+    // Try another account
+    verifiedExcludeIds.push(acquired.entryId);
+    acquired = acquireAccount(accountPool, req.codexRequest.model, [acquired.entryId], fmt.tag, undefined);
+    if (!acquired) {
+      return respondWithProxyError({
+        c, req, fmt,
+        status: 429,
+        message: "All accounts paused due to high request volume. Retry in a few minutes.",
+      });
+    }
+  } else if (anomalyAction === "throttle") {
+    console.warn(
+      `[${fmt.tag}] ⚠️ Stealth: Account ${acquired.entryId} exceeded hourly throttle threshold. Adding extra delay.`,
+    );
+    // Add significant extra delay to slow down request rate
+    await new Promise((resolve) => setTimeout(resolve, 3000 + Math.floor(Math.random() * 4000)));
+  } else if (anomalyAction === "warn") {
+    console.warn(
+      `[${fmt.tag}] ⚠️ Stealth: Account ${acquired.entryId} approaching hourly request limit.`,
+    );
+  }
+
+  // ── Circuit Breaker Check ──
+  // If this account's circuit is open (too many consecutive upstream failures),
+  // skip it and try another account to avoid hammering a broken path.
+  if (!circuitBreakerCanRequest(acquired.entryId)) {
+    releaseAccount(accountPool, acquired.entryId, undefined, released);
+    acquired = acquireAccount(accountPool, req.codexRequest.model, [acquired.entryId, ...verifiedExcludeIds], fmt.tag, undefined);
+    if (!acquired) {
+      return respondWithNoAccount({ c, req, fmt });
+    }
   }
 
   // ── Drift-Defense & Verification Loop ──
@@ -156,6 +246,10 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
   if (!acquired) return respondWithNoAccount({ c, req, fmt });
   let { entryId } = acquired;
+
+  // Expose account + model info to the log-capture middleware
+  c.set("logAccountId", entryId);
+  c.set("logModel", req.model);
 
   // ── Session Affinity Fallback Defense (Cascading Ban Prevention) ──
   // Only strip session identifiers when the preferred account is banned/disabled.
@@ -253,6 +347,10 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
 
   await staggerIfNeeded(acquired.prevSlotMs);
 
+  // Track request start time for duration header
+  const requestStartMs = Date.now();
+  c.header("X-Provider-Used", "codex");
+
   const buildPoolCtx = (forEntryId: string = entryId) =>
     buildWsPoolContext({
       useWebSocket: req.codexRequest.useWebSocket,
@@ -263,7 +361,18 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
       tag: fmt.tag,
     });
 
+  const MAX_RETRY_ITERATIONS = 10;
+  let retryIteration = 0;
   for (;;) {
+    if (++retryIteration > MAX_RETRY_ITERATIONS) {
+      releaseAccount(accountPool, entryId, undefined, released);
+      console.error(`[${fmt.tag}] ⛔ Hit MAX_RETRY_ITERATIONS (${MAX_RETRY_ITERATIONS}) for request ${requestId}. Aborting.`);
+      return respondWithProxyError({
+        c, req, fmt,
+        status: 502,
+        message: `Request failed after ${MAX_RETRY_ITERATIONS} retry attempts. All upstream attempts exhausted.`,
+      });
+    }
     await globalConcurrencySemaphore.acquire();
     let semaphoreReleased = false;
     const releaseSemaphore = () => {
@@ -292,8 +401,13 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
         resumeReason: implicitResume.resumeReasonForAttempt(),
       });
 
+      // Circuit breaker: record successful upstream connection
+      circuitBreakerSuccess(entryId);
+      recordModelRequest(req.model);
+
       // ── Streaming path ──
       if (req.isStreaming) {
+        c.header("X-Request-Duration-Ms", String(Date.now() - requestStartMs));
         // Hono streams execute asynchronously. The `handleStreaming` response is
         // returned instantly. We release the semaphore when the stream finishes or errors.
         const originalOnResponseCompleted = fmt.streamTranslator;
@@ -365,6 +479,33 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
           // We only cache valid successful JSON responses
           if (jsonBody && !jsonBody.error) {
             responseCache.set(cacheKey, jsonBody);
+            // Register with dedup so concurrent identical requests can share
+            if (dedupKey) {
+              registerDedupInFlight(dedupKey, Promise.resolve(jsonBody));
+            }
+          }
+          // Record analytics
+          const usage = (jsonBody as any)?.usage;
+          if (usage) {
+            getAnalytics().recordRequest({
+              model: req.model,
+              inputTokens: usage.prompt_tokens ?? usage.input_tokens,
+              outputTokens: usage.completion_tokens ?? usage.output_tokens,
+              cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens,
+              isError: false,
+            });
+            // Track prompt cache
+            const inputTok = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+            const cachedTok = usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0;
+            if (inputTok > 0) {
+              getPromptCacheTracker().record({
+                entryId,
+                conversationId: sessionContext.chainConversationId,
+                model: req.model,
+                inputTokens: inputTok,
+                cachedTokens: cachedTok,
+              });
+            }
           }
         } catch (e) {
           // ignore parsing error
@@ -372,6 +513,7 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
       }
 
       releaseSemaphore();
+      c.header("X-Request-Duration-Ms", String(Date.now() - requestStartMs));
       return nonStreamingResponse;
     } catch (err) {
       releaseSemaphore(); // Ensure semaphore is released before we sleep/retry or abort
@@ -413,6 +555,10 @@ export async function handleProxyRequest(options: HandleProxyRequestOptions): Pr
         }
 
         case "error_handler_decides": {
+          // Record failure for circuit breaker
+          circuitBreakerFailure(entryId);
+          recordModelRequest(req.model, true);
+
           const decision = handleCodexApiError(
             err as CodexApiError, accountPool, entryId, req.codexRequest.model, fmt.tag, modelRetried, cookieJar, proxyPool
           );

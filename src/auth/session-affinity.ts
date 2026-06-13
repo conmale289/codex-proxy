@@ -28,6 +28,7 @@ interface AffinityEntry {
 
 const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_ENTRIES = 10_000; // Bound memory usage in long-running deployments
 
 export class SessionAffinityMap {
   private map = new Map<string, AffinityEntry>();
@@ -50,6 +51,10 @@ export class SessionAffinityMap {
     functionCallIds?: string[],
     variantHash?: string,
   ): void {
+    // LRU eviction: when at capacity, remove oldest entries
+    if (this.map.size >= MAX_ENTRIES && !this.map.has(responseId)) {
+      this.evictOldest(Math.max(1, Math.floor(MAX_ENTRIES * 0.1))); // Evict 10%
+    }
     this.map.set(responseId, {
       entryId,
       conversationId,
@@ -153,6 +158,14 @@ export class SessionAffinityMap {
       if (now - entry.createdAt > this.ttlMs) {
         this.map.delete(key);
       }
+    }
+  }
+
+  /** Evict the N oldest entries by createdAt. Used for LRU-style size cap. */
+  private evictOldest(count: number): void {
+    const entries = [...this.map.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
+    for (let i = 0; i < count && i < entries.length; i++) {
+      this.map.delete(entries[i][0]);
     }
   }
 

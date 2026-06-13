@@ -84,7 +84,10 @@ export class AccountLifecycle {
     this.cleanupStaleSlots(nowMs);
 
     const config = getConfig();
-    const maxConcurrent = config.auth.max_concurrent_per_account ?? 3;
+    // Stealth mode overrides max concurrent per account to reduce detection risk
+    const maxConcurrent = config.stealth.enabled
+      ? Math.min(config.stealth.max_concurrent_per_account, config.auth.max_concurrent_per_account ?? 3)
+      : (config.auth.max_concurrent_per_account ?? 3);
     const skipExhausted = config.quota?.skip_exhausted === true;
     const excludeSet = options?.excludeIds?.length ? new Set(options.excludeIds) : null;
 

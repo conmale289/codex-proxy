@@ -137,6 +137,26 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   // Build upstream router from config
   const cfg = getConfig();
 
+  // Apply global concurrency limit from config
+  const { globalConcurrencySemaphore } = await import("./utils/concurrency-semaphore.js");
+  globalConcurrencySemaphore.setMaxConcurrency(cfg.quota.global_concurrency ?? 100);
+
+  // Log stealth mode status
+  if (cfg.stealth.enabled) {
+    console.log(`[Init] Stealth mode ENABLED — min interval: ${cfg.stealth.min_request_interval_ms}ms, ` +
+      `max concurrent/account: ${cfg.stealth.max_concurrent_per_account}, ` +
+      `per-account install IDs: ${cfg.stealth.per_account_installation_id}, ` +
+      `humanlike jitter: ${cfg.stealth.humanlike_jitter}`);
+  }
+
+  // Warn if proxy is running without authentication
+  if (!cfg.server.proxy_api_key) {
+    console.warn(
+      `[Init] ⚠️  WARNING: proxy_api_key is not set — ALL endpoints are unauthenticated! ` +
+      `Set server.proxy_api_key in data/local.yaml or the proxy is open to anyone who can reach it.`,
+    );
+  }
+
   // Wire WS connection pool to user config (defaults to enabled). Without
   // this call `getWsPool()` would always use DEFAULT_WS_POOL_CONFIG and
   // ignore `ws_pool.enabled: false` overrides — breaking the rollback path.
@@ -205,6 +225,8 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.route("/", createOfficialAgentRoutes());
   app.route("/", proxyRoutes);
   app.route("/", createModelRoutes(apiKeyPool));
+  const { createBatchRoutes } = await import("./routes/batch.js");
+  app.route("/", createBatchRoutes(accountPool));
   app.route("/", webRoutes);
 
   // Start server
@@ -258,6 +280,11 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const activeQuotaRefresher = new ActiveQuotaRefresher(accountPool, { cookieJar, proxyPool });
   activeQuotaRefresher.start();
 
+  // Start account auto-recovery — probes disabled accounts to detect lifted bans
+  const { AccountAutoRecovery } = await import("./auth/account-auto-recovery.js");
+  const autoRecovery = new AccountAutoRecovery(accountPool, { cookieJar, proxyPool });
+  autoRecovery.start();
+
   // Start proxy health check timer (if proxies exist)
   proxyPool.startHealthCheckTimer();
 
@@ -280,6 +307,13 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const upstreamBaseUrl = `http://${urlHostForLocalRequest(host)}:${actualPort}`;
   await startOllamaBridge(getConfig(), { upstreamBaseUrl });
 
+  // Pre-warm WS connections for active accounts (non-blocking)
+  if (cfg.ws_pool.enabled && accountPool.isAuthenticated()) {
+    import("./proxy/ws-pool-preconnect.js").then(({ preconnectWsPool }) => {
+      void preconnectWsPool(accountPool);
+    }).catch(() => { /* preconnect is best-effort */ });
+  }
+
   const close = async (): Promise<void> => {
     await stopOllamaBridge();
     return new Promise((resolve) => {
@@ -289,6 +323,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
         stopModelRefresh();
         stopQuotaRefresh();
         activeQuotaRefresher.stop();
+        autoRecovery.stop();
         stopSessionCleanup();
         refreshScheduler.destroy();
         proxyPool.destroy();

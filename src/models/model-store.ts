@@ -152,6 +152,23 @@ function normalizeAliases(input: Record<string, string> | undefined): Record<str
     const value = rawValue.trim();
     if (key && value) aliases[key] = value;
   }
+  // Validate: detect alias cycles (A→B→C→A) at load time
+  for (const startKey of Object.keys(aliases)) {
+    const visited = new Set<string>();
+    let current = startKey;
+    while (aliases[current]) {
+      if (visited.has(current)) {
+        console.warn(
+          `[ModelStore] ⚠️ Alias cycle detected: ${[...visited, current].join(" → ")}. ` +
+          `Removing alias "${startKey}" to break the cycle.`,
+        );
+        delete aliases[startKey];
+        break;
+      }
+      visited.add(current);
+      current = aliases[current];
+    }
+  }
   return aliases;
 }
 

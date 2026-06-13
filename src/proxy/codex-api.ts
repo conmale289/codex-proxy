@@ -9,7 +9,7 @@
  * (native rustls transport).
  */
 
-import { getConfig } from "../config.js";
+import { getConfig, getFingerprint } from "../config.js";
 import { createHash } from "crypto";
 import { getTransport, type TlsTransport } from "../tls/transport.js";
 import {
@@ -18,8 +18,9 @@ import {
 } from "../fingerprint/manager.js";
 import { createWebSocketResponse, type WsCreateRequest, type WsPoolContext } from "./ws-transport.js";
 import type { ParsedRateLimit } from "./rate-limit-headers.js";
-import { getInstallationId } from "./installation-id.js";
+import { getInstallationId, getPerAccountInstallationId } from "./installation-id.js";
 import { normalizeOpenAISubagent, OPENAI_SUBAGENT_HEADER } from "./openai-subagent.js";
+import { getAccountClientFingerprint, secChUaPlatformForPlatform, buildDiverseUserAgent } from "./client-diversity.js";
 
 export type { WsPoolContext };
 import { parseSSEBlock, parseSSEStream } from "./codex-sse.js";
@@ -104,6 +105,16 @@ export class CodexApi {
 
   private resolveTransport(): TlsTransport {
     return this.transport ?? getTransport();
+  }
+
+  /** Resolve the installation ID for this request. In stealth mode with
+   *  per-account IDs enabled, each account gets a unique deterministic UUID. */
+  private resolveInstallationId(): string {
+    const config = getConfig();
+    if (config.stealth.enabled && config.stealth.per_account_installation_id && this.entryId) {
+      return getPerAccountInstallationId(this.entryId);
+    }
+    return getInstallationId();
   }
 
   private buildConversationIdentity(request: CodexResponsesRequest): {
@@ -192,11 +203,22 @@ export class CodexApi {
     this.token = token;
   }
 
-  /** Build headers with cookies injected. */
+  /** Build headers with cookies and client diversity injected. */
   private applyHeaders(headers: Record<string, string>): Record<string, string> {
     if (this.cookieJar && this.entryId) {
       const cookie = this.cookieJar.getCookieHeader(this.entryId);
       if (cookie) headers["Cookie"] = cookie;
+    }
+    // Apply per-account client diversity when stealth mode is active
+    if (this.entryId) {
+      const config = getConfig();
+      if (config.stealth.enabled) {
+        const fp = getAccountClientFingerprint(this.entryId);
+        const fingerprintCfg = getFingerprint();
+        headers["User-Agent"] = buildDiverseUserAgent(fingerprintCfg.user_agent_template, config.client.app_version, fp);
+        headers["sec-ch-ua-platform"] = secChUaPlatformForPlatform(fp.platform);
+        headers["sec-ch-ua"] = `"Chromium";v="${fp.chromiumVersion}", "Not:A-Brand";v="24"`;
+      }
     }
     return headers;
   }
@@ -332,7 +354,7 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
-    const installationId = getInstallationId();
+    const installationId = this.resolveInstallationId();
     headers["x-codex-installation-id"] = installationId;
     const identity = this.buildConversationIdentity(request);
     if (identity.conversationId) {
@@ -396,7 +418,7 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
-    const installationId = getInstallationId();
+    const installationId = this.resolveInstallationId();
     headers["x-codex-installation-id"] = installationId;
     const identity = this.buildConversationIdentity(request);
     if (identity.conversationId) {
@@ -498,7 +520,7 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
-    headers["x-codex-installation-id"] = getInstallationId();
+    headers["x-codex-installation-id"] = this.resolveInstallationId();
 
     const body = JSON.stringify(request);
 

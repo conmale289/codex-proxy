@@ -44,6 +44,10 @@ export function apiKeyAuth(accountPool: AccountPool): MiddlewareHandler {
     const providedKey = extractProxyApiKey(c);
     if (!providedKey || !accountPool.validateProxyApiKey(providedKey)) {
       const path = c.req.path;
+      const clientIp = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
+      console.warn(
+        `[auth-failure] ip=${clientIp} path=${path} key=${providedKey ? providedKey.slice(0, 8) + "..." : "none"} ts=${new Date().toISOString()}`,
+      );
       c.status(401);
 
       if (path.startsWith("/admin/")) {
