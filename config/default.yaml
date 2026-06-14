@@ -49,6 +49,7 @@ tls:
 quota:
   refresh_interval_minutes: 0
   concurrency: 10
+  global_concurrency: 100
   warning_thresholds:
     primary:
       - 80
@@ -60,6 +61,17 @@ quota:
 update:
   auto_update: true
   show_update_dialog: false
+stealth:
+  enabled: false
+  min_request_interval_ms: 3000
+  max_concurrent_per_account: 1
+  per_account_installation_id: true
+  humanlike_jitter: true
+  hourly_request_warn: 100
+  hourly_request_throttle: 200
+  hourly_request_pause: 500
+notifications:
+  webhook_url: null
 ollama:
   enabled: false
   host: 127.0.0.1

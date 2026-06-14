@@ -23,8 +23,9 @@
   </p>
 
   <p>
-    <a href="./README.md">简体中文</a> |
-    <strong>English</strong>
+    <a href="./README_ZH.md">简体中文</a> |
+    <strong>English</strong> |
+    <a href="./README.md">Tiếng Việt</a>
   </p>
 
   <br>

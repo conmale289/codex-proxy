@@ -88,10 +88,12 @@ export function LogsPage({ embedded = false }: { embedded?: boolean }) {
               <div class="min-w-[520px]">
                 <div class="grid grid-cols-12 text-xs text-slate-500 px-3 py-2 border-b border-slate-200 dark:border-border-dark">
                   <div class="col-span-2">{t("logsTime")}</div>
-                  <div class="col-span-2">{t("logsDirection")}</div>
-                  <div class="col-span-4">{t("logsPath")}</div>
-                  <div class="col-span-2">{t("logsStatus")}</div>
-                  <div class="col-span-2">{t("logsLatency")}</div>
+                  <div class="col-span-1">{t("logsDirection")}</div>
+                  <div class="col-span-2">Model</div>
+                  <div class="col-span-3">{t("logsPath")}</div>
+                  <div class="col-span-2">Account</div>
+                  <div class="col-span-1">{t("logsStatus")}</div>
+                  <div class="col-span-1">{t("logsLatency")}</div>
                 </div>
                 {logs.loading && (
                   <div class="p-4 text-xs text-slate-500">{t("logsLoading")}</div>
@@ -107,14 +109,21 @@ export function LogsPage({ embedded = false }: { embedded?: boolean }) {
                       onClick={() => logs.selectLog(row.id)}
                     >
                       <div class="col-span-2 text-slate-500">{row.time}</div>
-                      <div class="col-span-2">
+                      <div class="col-span-1">
                         <span class={`px-1.5 py-0.5 rounded ${row.direction === "ingress" ? "bg-success-container text-success" : "bg-info-container text-info"}`}>
-                          {t(`logsFilter.${row.direction}`)}
+                          {row.direction === "ingress" ? "IN" : "OUT"}
                         </span>
                       </div>
-                      <div class="col-span-4 truncate">{row.path}</div>
-                      <div class="col-span-2">{row.status ?? "-"}</div>
-                      <div class="col-span-2">{row.latencyMs != null ? `${row.latencyMs}ms` : "-"}</div>
+                      <div class="col-span-2 truncate">
+                        {row.model || "-"}
+                        {row.meta?.cacheHit && (
+                          <span class="ml-1 px-1 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300" title="Cache Hit">⚡</span>
+                        )}
+                      </div>
+                      <div class="col-span-3 truncate">{row.path}</div>
+                      <div class="col-span-2 truncate text-slate-500">{row.meta?.accountId ? String(row.meta.accountId).slice(0, 8) : "-"}</div>
+                      <div class="col-span-1">{row.status ?? "-"}</div>
+                      <div class="col-span-1">{row.latencyMs != null ? `${row.latencyMs}ms` : "-"}</div>
                     </button>
                   ))}
                 </div>

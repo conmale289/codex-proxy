@@ -35,6 +35,7 @@ export interface LogRecord {
   error?: string | null;
   request?: unknown;
   response?: unknown;
+  meta?: Record<string, unknown>;
 }
 
 export interface LogState {

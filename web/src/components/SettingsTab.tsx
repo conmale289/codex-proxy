@@ -4,6 +4,7 @@ import { ModelAliasSettings } from "./ModelAliasSettings";
 import { OllamaBridgeSettings } from "./OllamaBridgeSettings";
 import { QuotaSettings } from "./QuotaSettings";
 import { RotationSettings } from "./RotationSettings";
+import { StealthSettings } from "./StealthSettings";
 import { SettingsPanel } from "./SettingsPanel";
 import { ApiConfig } from "./ApiConfig";
 import { AnthropicSetup } from "./AnthropicSetup";
@@ -32,6 +33,7 @@ export function SettingsTab(props: SettingsTabProps) {
       <LogsSettings />
       <QuotaSettings />
       <RotationSettings />
+      <StealthSettings />
       <SettingsPanel />
       <ApiConfig
         baseUrl={props.baseUrl}

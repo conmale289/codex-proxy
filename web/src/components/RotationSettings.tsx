@@ -4,7 +4,7 @@ import { useRotationSettings, type RotationStrategy } from "../../../shared/hook
 import { useSettings } from "../../../shared/hooks/use-settings";
 
 type Mode = "sticky" | "rotation";
-type RotationSub = "least_used" | "round_robin";
+type RotationSub = "least_used" | "round_robin" | "adaptive";
 
 function toMode(strategy: RotationStrategy): Mode {
   return strategy === "sticky" ? "sticky" : "rotation";
@@ -98,6 +98,19 @@ export function RotationSettings() {
             {/* Sub-strategy (only when rotation mode) */}
             {displayMode === "rotation" && (
               <div class="ml-10 space-y-2">
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="rotation-sub"
+                    checked={displaySub === "adaptive"}
+                    onChange={() => setDraftSub("adaptive")}
+                    class={radioCls}
+                  />
+                  <div>
+                    <span class="text-xs font-medium text-slate-600 dark:text-text-main">{t("rotationAdaptive")}</span>
+                    <span class="text-xs text-slate-400 dark:text-text-dim ml-1.5">{t("rotationAdaptiveDesc")}</span>
+                  </div>
+                </label>
                 <label class="flex items-center gap-2 cursor-pointer">
                   <input
                     type="radio"
